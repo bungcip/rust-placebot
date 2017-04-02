@@ -1,0 +1,13 @@
+[package]
+name = "rust-placebot"
+version = "0.1.0"
+authors = ["Gigih Aji Ibrahim <bungcip@gmail.com>"]
+
+[dependencies]
+reqwest = "*"
+serde = "*"
+serde_json = "*"
+serde_derive = "*"
+bmp = "*"
+rand = "*"
+toml = "0.3"
