@@ -30,7 +30,7 @@ HOW TO USE rust-placebot
     offset = { x = 915, y = 871}        ## Top Left Coordinate in /r/place
   ```
 
-- edit `ref.bmp` with your favorite image editor. You must only use color allowed in /r/place,  otherwise the forbidden color will be replace with color from zero index pallete.
+- edit `ref.bmp` with your favorite image editor. You must only use color allowed in /r/place,  otherwise the forbidden color will be replaced with color from zero index pallete.
 
 - run `cargo run`
 
@@ -54,3 +54,5 @@ Allowed Colors in RGB format
     (0, 0, 234),
     (207, 110, 228),
     (130, 0, 128),
+
+Or you use `reddit_place_palette.txt` if you use `Paint.NET`
