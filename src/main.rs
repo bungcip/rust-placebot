@@ -1,24 +1,112 @@
+#![recursion_limit = "1024"]
+
 extern crate reqwest;
 extern crate bmp;
 extern crate rand;
 extern crate toml;
+extern crate serde_json;
 
 #[macro_use]
 extern crate serde_derive;
-extern crate serde_json;
+#[macro_use]
+extern crate error_chain;
 
 use std::io::prelude::*;
+// use std::result::Result;
+// use std::error::Error;
 
-#[derive(Deserialize, Debug)] struct ConfigData { users: Vec<ConfigUser>, image: ConfigImage}
-#[derive(Deserialize, Debug, Clone)] struct ConfigUser { username: String, password: String}
-#[derive(Deserialize, Debug, Clone)] struct ConfigImage { path: String, offset: ConfigOffset}
-#[derive(Deserialize, Debug, Clone, Copy)] struct ConfigOffset { x: u32, y: u32 }
+#[derive(Deserialize, Debug)]
+struct ConfigData {
+    users: Vec<ConfigUser>,
+    image: ConfigImage,
+}
+#[derive(Deserialize, Debug, Clone)]
+struct ConfigUser {
+    username: String,
+    password: String,
+}
+#[derive(Deserialize, Debug, Clone)]
+struct ConfigImage {
+    path: String,
+    offset: ConfigOffset,
+}
+#[derive(Deserialize, Debug, Clone, Copy)]
+struct ConfigOffset {
+    x: u32,
+    y: u32,
+}
 
-#[derive(Deserialize, Debug)] struct RedditLogin { json: RedditLoginJson }
-#[derive(Deserialize, Debug)] struct RedditLoginJson { data: RedditLoginData }
-#[derive(Deserialize, Debug)] struct RedditLoginData { modhash: String }
-#[derive(Deserialize, Debug)] struct RedditDraw { wait_seconds: i32 }
-#[derive(Deserialize, Debug)] struct RedditPixel { x: u32, y: u32, timestamp: f64, user_name: String, color: u32 }
+#[derive(Deserialize, Debug)]
+struct RedditLogin {
+    json: RedditLoginJson,
+}
+#[derive(Deserialize, Debug)]
+struct RedditLoginJson {
+    data: RedditLoginData,
+}
+#[derive(Deserialize, Debug)]
+struct RedditLoginData {
+    modhash: String,
+}
+#[derive(Deserialize, Debug)]
+struct RedditDraw {
+    wait_seconds: i32,
+}
+#[derive(Deserialize, Debug)]
+struct RedditPixel {
+    x: u32,
+    y: u32,
+    timestamp: f64,
+    user_name: String,
+    color: u32,
+}
+
+
+mod errors {
+    // Create the Error, ErrorKind, ResultExt, and Result types
+    error_chain! { 
+        // Automatic conversions between this error chain and other
+        // error chains. In this case, it will e.g. generate an
+        // `ErrorKind` variant called `Another` which in turn contains
+        // the `other_error::ErrorKind`, with conversions from
+        // `other_error::Error`.
+        //
+        // Optionally, some attributes can be added to a variant.
+        //
+        // This section can be empty.
+        links {
+            // Another(other_error::Error, other_error::ErrorKind) #[cfg(unix)];
+        }
+
+        // Automatic conversions between this error chain and other
+        // error types not defined by the `error_chain!`. These will be
+        // wrapped in a new error with, in the first case, the
+        // `ErrorKind::Fmt` variant. The description and cause will
+        // forward to the description and cause of the original error.
+        //
+        // Optionally, some attributes can be added to a variant.
+        //
+        // This section can be empty.
+        foreign_links {
+            Request(::reqwest::Error);
+            // Fmt(::std::fmt::Error);
+            // Io(::std::io::Error) #[cfg(unix)];
+        }
+
+        // Define additional `ErrorKind` variants. The syntax here is
+        // the same as `quick_error!`, but the `from()` and `cause()`
+        // syntax is not supported.
+        errors {
+            // LoginError(t: String) {
+            //     description("cannot login to reddit API")
+            //     display("cannot login to reddit API: '{}'", t)
+            // }
+        }        
+    }
+}
+
+use errors::*;
+
 
 struct UserToken {
     cookies: Vec<String>,
@@ -26,49 +114,49 @@ struct UserToken {
     username: String,
 }
 
-fn login<'a>(username: &'a str, password: &'a str) ->  UserToken {
+/// Login to Reddit.
+/// return a UserToken object which can be passed to function draw
+fn login<'a>(username: &'a str, password: &'a str) -> Result<UserToken> {
     println!("[login] username: {}", username);
 
-    let client = reqwest::Client::new().unwrap();
+    let client = reqwest::Client::new()?;
     let url = format!("https://www.reddit.com/api/login/{}", username);
-    let params = [
-        ("op", "login"),
-        ("user", &username),
-        ("passwd", &password),
-        ("api_type", "json")
-    ];
+    let params =
+        [("op", "login"), ("user", &username), ("passwd", &password), ("api_type", "json")];
     let result = client.post(&url)
         .form(&params)
         .send();
 
-    let mut response = result.unwrap();
+    let mut response = result?;
 
     // get cookie & modhash
-    let body: RedditLogin = response.json().unwrap();
+    let body: RedditLogin = response.json()?;
     let modhash = body.json.data.modhash;
-
-    let cookies = response.headers().get::<reqwest::header::SetCookie>().unwrap();
+    let cookies = match response.headers().get::<reqwest::header::SetCookie>(){
+        Some(cookies) => cookies,
+        None => bail!("cookie seem missing"),
+    };
 
     // println!("modhash: {:?}", modhash);
     // println!("cookie: {:?}", cookies);
 
-    UserToken {
+    Ok(UserToken {
         cookies: cookies.0.clone(),
         modhash: modhash,
         username: username.to_string(),
-    }
+    })
 }
 
-fn draw(user_token: &UserToken, x: u32, y: u32, color: u32)  {
-    println!("[paint] user: {}, coordinate: ({}, {}), color: {}", user_token.username, x, y, color);
+fn draw(user_token: &UserToken, x: u32, y: u32, color: u32) {
+    println!("[paint] user: {}, coordinate: ({}, {}), color: {}",
+             user_token.username,
+             x,
+             y,
+             color);
 
     let client = reqwest::Client::new().unwrap();
     let url = "https://www.reddit.com/api/place/draw.json";
-    let params = [
-        ("x", x),
-        ("y", y),
-        ("color", color),
-    ];
+    let params = [("x", x), ("y", y), ("color", color)];
     let mut headers = reqwest::header::Headers::new();
     headers.set(reqwest::header::Cookie(user_token.cookies.clone()));
     headers.append_raw("x-modhash", user_token.modhash.as_bytes().to_vec());
@@ -93,7 +181,7 @@ fn draw(user_token: &UserToken, x: u32, y: u32, color: u32)  {
                             println!("  json result is error: {}", why);
                         }
                     }
-                },
+                }
                 _ => {
                     println!("  status code is error: {}", response.status());
                 }
@@ -122,7 +210,9 @@ fn check_pixel(x: u32, y: u32, color: u32) -> bool {
     println!("[pixel check] is coordinate ({},{}) == {} ?", x, y, color);
 
     let client = reqwest::Client::new().unwrap();
-    let url = format!("https://www.reddit.com/api/place/pixel.json?x={}&y={}", x, y);
+    let url = format!("https://www.reddit.com/api/place/pixel.json?x={}&y={}",
+                      x,
+                      y);
     let result = client.get(&url).send();
     let mut response = result.unwrap();
 
@@ -135,50 +225,50 @@ fn check_pixel(x: u32, y: u32, color: u32) -> bool {
     let body: RedditPixel = response.json().unwrap();
 
     if body.color != color {
-        println!("  NO (current color: {} by {}). need redraw...", body.color, body.user_name);
+        println!("  NO (current color: {} by {}). need redraw...",
+                 body.color,
+                 body.user_name);
         return false;
-    }else{
+    } else {
         println!("  YES");
         return true;
     }
 }
 
 fn load_image(path: &str) -> (u32, u32, Vec<u32>) {
-    let palletes: [(u8, u8, u8); 16] = [
-        (255, 255, 255),
-        (228, 228, 228),
-        (136, 136, 136),
-        (34, 34, 34),
-        (255, 167, 209),
-        (229, 0, 0),
-        (229, 149, 0),
-        (160, 106, 66),
-        (229, 217, 0),
-        (148, 224, 68),
-        (2, 190, 1),
-        (0, 211, 221),
-        (0, 131, 199),
-        (0, 0, 234),
-        (207, 110, 228),
-        (130, 0, 128),
-    ];
+    let palletes: [(u8, u8, u8); 16] = [(255, 255, 255),
+                                        (228, 228, 228),
+                                        (136, 136, 136),
+                                        (34, 34, 34),
+                                        (255, 167, 209),
+                                        (229, 0, 0),
+                                        (229, 149, 0),
+                                        (160, 106, 66),
+                                        (229, 217, 0),
+                                        (148, 224, 68),
+                                        (2, 190, 1),
+                                        (0, 211, 221),
+                                        (0, 131, 199),
+                                        (0, 0, 234),
+                                        (207, 110, 228),
+                                        (130, 0, 128)];
 
-// <div style="background-color: rgb(255, 255, 255);" class="place-swatch"></div>
-// <div style="background-color: rgb(228, 228, 228);" class="place-swatch"></div>
-// <div style="background-color: rgb(136, 136, 136);" class="place-swatch"></div>
-// <div style="background-color: rgb(34, 34, 34);" class="place-swatch"></div>
-// <div style="background-color: rgb(255, 167, 209);" class="place-swatch"></div>
-// <div style="background-color: rgb(229, 0, 0);" class="place-swatch"></div>
-// <div style="background-color: rgb(229, 149, 0);" class="place-swatch"></div>
-// <div style="background-color: rgb(160, 106, 66);" class="place-swatch"></div>
-// <div style="background-color: rgb(229, 217, 0);" class="place-swatch"></div>
-// <div style="background-color: rgb(148, 224, 68);" class="place-swatch"></div>
-// <div style="background-color: rgb(2, 190, 1);" class="place-swatch"></div>
-// <div style="background-color: rgb(0, 211, 221);" class="place-swatch"></div>
-// <div style="background-color: rgb(0, 131, 199);" class="place-swatch"></div>
-// <div style="background-color: rgb(0, 0, 234);" class="place-swatch"></div>
-// <div style="background-color: rgb(207, 110, 228);" class="place-swatch"></div>
-// <div style="background-color: rgb(130, 0, 128);" class="place-swatch"></div></div>    
+    // <div style="background-color: rgb(255, 255, 255);" class="place-swatch"></div>
+    // <div style="background-color: rgb(228, 228, 228);" class="place-swatch"></div>
+    // <div style="background-color: rgb(136, 136, 136);" class="place-swatch"></div>
+    // <div style="background-color: rgb(34, 34, 34);" class="place-swatch"></div>
+    // <div style="background-color: rgb(255, 167, 209);" class="place-swatch"></div>
+    // <div style="background-color: rgb(229, 0, 0);" class="place-swatch"></div>
+    // <div style="background-color: rgb(229, 149, 0);" class="place-swatch"></div>
+    // <div style="background-color: rgb(160, 106, 66);" class="place-swatch"></div>
+    // <div style="background-color: rgb(229, 217, 0);" class="place-swatch"></div>
+    // <div style="background-color: rgb(148, 224, 68);" class="place-swatch"></div>
+    // <div style="background-color: rgb(2, 190, 1);" class="place-swatch"></div>
+    // <div style="background-color: rgb(0, 211, 221);" class="place-swatch"></div>
+    // <div style="background-color: rgb(0, 131, 199);" class="place-swatch"></div>
+    // <div style="background-color: rgb(0, 0, 234);" class="place-swatch"></div>
+    // <div style="background-color: rgb(207, 110, 228);" class="place-swatch"></div>
+    // <div style="background-color: rgb(130, 0, 128);" class="place-swatch"></div></div>
 
     println!("[load reference bitmap] {}", path);
 
@@ -190,8 +280,8 @@ fn load_image(path: &str) -> (u32, u32, Vec<u32>) {
     let height = img.get_height();
 
     let mut content: Vec<u32> = Vec::new();
-    
-    for (x,y) in img.coordinates(){
+
+    for (x, y) in img.coordinates() {
         let pixel = img.get_pixel(x, y);
         /// rgb = 0,1,2
 
@@ -199,15 +289,19 @@ fn load_image(path: &str) -> (u32, u32, Vec<u32>) {
         for (index, &(r, g, b)) in palletes.into_iter().enumerate() {
             if pixel.r == r && pixel.g == g && pixel.b == b {
                 has_pallete = true;
-                content.push( index as u32 );
+                content.push(index as u32);
                 break;
-            }else{
+            } else {
                 continue;
             }
         }
 
         if has_pallete == false {
-            println!("image have unexpected color! ({:?}) on coordinate ({}, {}), fallback to pallete index 0", pixel, x, y);
+            println!("image have unexpected color! ({:?}) on coordinate ({}, {}), fallback to \
+                      pallete index 0",
+                     pixel,
+                     x,
+                     y);
             content.push(0);
         }
 
@@ -217,12 +311,18 @@ fn load_image(path: &str) -> (u32, u32, Vec<u32>) {
     (width, height, content)
 }
 
-/// check pixel in /r/place randomly, 
+/// check pixel in /r/place randomly,
 /// if different with reference image then
 /// replace the pixel
 /// return true if pixel replaced
 /// false othwerwise
-fn work(width: u32, height: u32, pixels: &[u32], offset_x: u32, offset_y: u32, user_token: &UserToken) -> bool {
+fn work(width: u32,
+        height: u32,
+        pixels: &[u32],
+        offset_x: u32,
+        offset_y: u32,
+        user_token: &UserToken)
+        -> bool {
     use rand::distributions::{IndependentSample, Range};
 
     let between_x = Range::new(0, width);
@@ -232,7 +332,7 @@ fn work(width: u32, height: u32, pixels: &[u32], offset_x: u32, offset_y: u32, u
     let x = between_x.ind_sample(&mut rng);
     let y = between_y.ind_sample(&mut rng);
     let index = (y * width) + x;
-    let color = pixels[ index as usize ];
+    let color = pixels[index as usize];
 
     let absolute_x = offset_x + x;
     let absolute_y = offset_y + y;
@@ -240,18 +340,35 @@ fn work(width: u32, height: u32, pixels: &[u32], offset_x: u32, offset_y: u32, u
     if is_same == false {
         draw(user_token, absolute_x, absolute_y, color);
         return true;
-    }else{
+    } else {
         return false;
     }
 }
 
 
 /// just looping
-fn worker_per_user<'a>(width: u32, height: u32, pixels: &'a [u32], offset_x: u32, offset_y: u32, username: &'a str, password: &'a str){
+fn worker_per_user<'a>(width: u32,
+                       height: u32,
+                       pixels: &'a [u32],
+                       offset_x: u32,
+                       offset_y: u32,
+                       username: &'a str,
+                       password: &'a str) {
     const MAX_RETRY: i32 = 5;
 
     loop {
-        let user_token = login(username, password);
+        let user_token = match login(username, password) {
+            Ok(user_token) => user_token,
+            Err(why) => {
+                println!("cannot login to reddit: {}", why.description());
+
+                /// sleep 1000 ms
+                let duration = std::time::Duration::from_millis(1000);
+                std::thread::sleep(duration);
+                continue;
+            }
+        };
+
         let mut is_working = false;
         let mut retry = 0;
 
@@ -283,10 +400,10 @@ fn load_config(config_file: &str) -> ConfigData {
 
 fn main() {
     let config = load_config("reddit_place.toml");
-    let ConfigData{users, image} = config;
+    let ConfigData { users, image } = config;
 
     let mut children = vec![];
-    for ConfigUser{username, password} in users {
+    for ConfigUser { username, password } in users {
         let image = image.clone();
         children.push(std::thread::spawn(move || {
             println!("thread for user {}", username);
@@ -294,12 +411,18 @@ fn main() {
             let offset = image.offset;
             let image_path = &image.path;
             let (width, height, pixels) = load_image(&image_path);
-            worker_per_user(width, height, &pixels, offset.x, offset.y, &username, &password);
+            worker_per_user(width,
+                            height,
+                            &pixels,
+                            offset.x,
+                            offset.y,
+                            &username,
+                            &password);
         }));
     }
 
     for child in children {
         let _ = child.join();
     }
-    
+
 }
