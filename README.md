@@ -13,7 +13,7 @@ HOW TO USE rust-placebot
 
   `git clone https://github.com/bungcip/rust-placebot`
 
-- edit `reddit_place.toml` and add your accounts
+- copy `users.toml.example` to `users.toml` and add your accounts
 
   ```
     ## username & password reddit login pair
@@ -23,6 +23,7 @@ HOW TO USE rust-placebot
         {username="your_username_2", password="your_password_2"},
     ]
   ```
+  
 - change `[image]` table with your preference:
   ```
   [image]

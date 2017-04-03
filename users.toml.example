@@ -1,0 +1,6 @@
+## username & password reddit login pair
+## use your throwaway account as slav.. I mean worker 
+users = [
+   {username="username_1", password="password_1"},
+   {username="username_2", password="password_2"},
+]

@@ -4,6 +4,7 @@ extern crate reqwest;
 extern crate bmp;
 extern crate rand;
 extern crate toml;
+extern crate serde;
 extern crate serde_json;
 
 #[macro_use]
@@ -14,12 +15,18 @@ extern crate error_chain;
 use std::io::prelude::*;
 // use std::result::Result;
 // use std::error::Error;
+use std::path::Path;
 
 #[derive(Deserialize, Debug)]
 struct ConfigData {
-    users: Vec<ConfigUser>,
     image: ConfigImage,
 }
+
+#[derive(Deserialize, Debug, Clone)]
+struct ConfigUserToml {
+    users: Vec<ConfigUser>,
+}
+
 #[derive(Deserialize, Debug, Clone)]
 struct ConfigUser {
     username: String,
@@ -88,9 +95,10 @@ mod errors {
         //
         // This section can be empty.
         foreign_links {
+            Config(::toml::de::Error);
             Request(::reqwest::Error);
-            // Fmt(::std::fmt::Error);
-            // Io(::std::io::Error) #[cfg(unix)];
+            Fmt(::std::fmt::Error);
+            Io(::std::io::Error);
         }
 
         // Define additional `ErrorKind` variants. The syntax here is
@@ -387,20 +395,40 @@ fn worker_per_user<'a>(width: u32,
     }
 }
 
-fn load_config(config_file: &str) -> ConfigData {
-    let path = std::path::Path::new(config_file);
-    let mut file = std::fs::File::open(&path).unwrap();
+fn load_toml<T: serde::Deserialize>(config_file: &str) -> Result<T> {
+    let path = Path::new(config_file);
+    let mut file = std::fs::File::open(&path)?;
     let mut s = String::new();
 
-    file.read_to_string(&mut s).unwrap();
+    file.read_to_string(&mut s)?;
+    let ret = toml::from_str::<T>(&s);
+    match ret {
+        Ok(r) => Ok(r),
+        Err(why) => bail!("cannot deserialize toml file: {}", why),
+    }
+}
 
-    let data: ConfigData = toml::from_str(&s).unwrap();
-    data
+
+/// get user name & password pair from users.toml
+fn load_available_accounts() -> Result<Vec<ConfigUser>> {
+    let content: ConfigUserToml = load_toml("users.toml")?;
+    Ok(content.users)
 }
 
 fn main() {
-    let config = load_config("reddit_place.toml");
-    let ConfigData { users, image } = config;
+    let config = load_toml("reddit_place.toml");
+    let ConfigData { image } = config.unwrap();
+
+    // get users account data
+    let users = match load_available_accounts(){
+        Ok(users) => users,
+        Err(why) => {
+            println!("cannot open users.toml: {}", why.description());
+            return
+        }
+    };
+
+
 
     let mut children = vec![];
     for ConfigUser { username, password } in users {
