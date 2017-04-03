@@ -17,6 +17,7 @@ use std::io::prelude::*;
 // use std::result::Result;
 // use std::error::Error;
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Deserialize, Debug, Clone)] struct ConfigUserToml { users: Vec<ConfigUser> }
 #[derive(Deserialize, Debug, Clone)] struct ConfigTargetToml { image: ConfigImage }
@@ -67,13 +68,6 @@ mod errors {
         }
 
         // Automatic conversions between this error chain and other
-        // error types not defined by the `error_chain!`. These will be
-        // wrapped in a new error with, in the first case, the
-        // `ErrorKind::Fmt` variant. The description and cause will
-        // forward to the description and cause of the original error.
-        //
-        // Optionally, some attributes can be added to a variant.
-        //
         // This section can be empty.
         foreign_links {
             Config(::toml::de::Error);
@@ -82,14 +76,17 @@ mod errors {
             Io(::std::io::Error);
         }
 
-        // Define additional `ErrorKind` variants. The syntax here is
-        // the same as `quick_error!`, but the `from()` and `cause()`
-        // syntax is not supported.
+        // Define additional `ErrorKind` variants
         errors {
-            // LoginError(t: String) {
-            //     description("cannot login to reddit API")
-            //     display("cannot login to reddit API: '{}'", t)
-            // }
+            TooManyRequestError(delay: u32){
+                description("too much request sent to Reddit")
+                display("too much request sent to Reddit API need '{}' seconds delay", delay)
+            }
+
+            HttpRequestError(code: ::reqwest::StatusCode) {
+                description("HTTP error")
+                display("HTTP error: '{}'", code)
+            }
         }        
     }
 }
@@ -108,6 +105,12 @@ struct PixelImage {
     width: u32,
     height: u32,
     pixels: Box<[u8]>, // in palette index   
+}
+
+enum WorkState {
+    Done(u32), // working is done, the user must wait before next job
+    Wait(u32), // this user need to wait before working
+    NextJob,
 }
 
 /// Login to Reddit.
@@ -143,7 +146,8 @@ fn login<'a>(username: &'a str, password: &'a str) -> Result<UserToken> {
     })
 }
 
-fn draw(user_token: &UserToken, x: u32, y: u32, color: u32) {
+/// return how much second must be delayed
+fn draw(user_token: &UserToken, x: u32, y: u32, color: u32) -> Result<u32> {
     println!("[paint] user: {}, coordinate: ({}, {}), color: {}",
              user_token.username,
              x,
@@ -162,28 +166,25 @@ fn draw(user_token: &UserToken, x: u32, y: u32, color: u32) {
         .headers(headers)
         .send();
 
-    match result {
-        Ok(mut response) => {
-            let status_code = response.status().clone();
-            match status_code {
-                reqwest::StatusCode::Ok => {
-                    match response.json::<RedditDraw>() {
-                        Ok(body) => {
-                            // println!("  body: {:?}", body);
-                            let wait_seconds = body.wait_seconds;
-                            println!("  wait_seconds: {}", wait_seconds);
-                        }
-                        Err(why) => {
-                            println!("  json result is error: {}", why);
-                        }
-                    }
-                }
-                _ => {
-                    println!("  status code is error: {}", response.status());
-                }
-            }
+    let mut response = result?;
+    let status_code = response.status().clone();
+    match status_code {
+        reqwest::StatusCode::Ok => {
+            let body = response.json::<RedditDraw>()?;
+            let wait_seconds = body.wait_seconds;
+            println!("  wait_seconds: {}", wait_seconds);
+            return Ok(wait_seconds as u32);
         }
-        Err(why) => println!("  error when sending request: {}", why),
+        reqwest::StatusCode::TooManyRequests => {
+            println!("  status code is error: {}", response.status());
+            let body = response.json::<RedditDraw>()?;
+            let wait_seconds = body.wait_seconds as u32;
+            println!("  wait_seconds: {}", wait_seconds);
+            return Err(ErrorKind::TooManyRequestError(wait_seconds).into());
+        },
+        other => {
+            return Err(ErrorKind::HttpRequestError(other).into());
+        },
     }
 }
 
@@ -298,7 +299,7 @@ fn load_image(path: &str) -> PixelImage {
 /// replace the pixel
 /// return true if pixel replaced
 /// false othwerwise
-fn work(image: &PixelImage, offset_x: u32, offset_y: u32, user_token: &UserToken) -> bool {
+fn work(image: &PixelImage, offset_x: u32, offset_y: u32, user_token: &UserToken) -> Result<WorkState> {
     use rand::distributions::{IndependentSample, Range};
 
     let between_x = Range::new(0, image.width);
@@ -314,10 +315,24 @@ fn work(image: &PixelImage, offset_x: u32, offset_y: u32, user_token: &UserToken
     let absolute_y = offset_y + y;
     let is_same = check_pixel(absolute_x, absolute_y, color);
     if is_same == false {
-        draw(user_token, absolute_x, absolute_y, color);
-        return true;
+        match draw(user_token, absolute_x, absolute_y, color) {
+            Ok(delay) => {
+                return Ok(WorkState::Done(delay));
+            },
+            Err(why) => {
+                match why {
+                    Error(ErrorKind::TooManyRequestError(delay), _) => {
+                        return Ok(WorkState::Wait(delay));
+                    },
+                    other => {
+                        return Err(other)
+                    }
+                }
+            }
+        }
+
     } else {
-        return false;
+        return Ok(WorkState::NextJob);
     }
 }
 
@@ -344,20 +359,42 @@ fn worker_per_user<'a>(image: &'a PixelImage,
             }
         };
 
-        let mut is_working = false;
         let mut retry = 0;
+        let mut wait_seconds : u32 = 1;
 
-        while is_working == false && retry < MAX_RETRY {
-            is_working = work(&image, offset_x, offset_y, &user_token);
-            retry += 1;
+        while retry < MAX_RETRY {
+            match work(&image, offset_x, offset_y, &user_token){
+                Ok(state) => match state {
+                    WorkState::Done(delay) => {
+                        wait_seconds = delay;
+                    },
+                    WorkState::Wait(delay) => {
+                        wait_seconds = delay;
+                    },
+                    WorkState::NextJob => {
+                        wait_seconds = 1;
+                        retry += 1;
 
-            /// sleep 100 ms
-            let duration = std::time::Duration::from_millis(100);
-            std::thread::sleep(duration);
+                        /// continue for next job, not need to login again
+                        std::thread::sleep(Duration::from_millis(1000));
+                        continue;
+                    }
+                },
+
+                Err(why) => {
+                    retry += 1;
+                    println!("error happens: {}", why.description());
+                    std::thread::sleep(Duration::from_millis(1000));
+                    continue;
+                }
+            }
+
+            break;
         }
 
-        /// wait 5 minutes
-        let duration = std::time::Duration::from_millis(1_000 * 60 * 5);
+        /// wait 
+        let wait_seconds = wait_seconds as u64;
+        let duration = std::time::Duration::from_millis(1_000 * wait_seconds);
         std::thread::sleep(duration);
     }
 }
