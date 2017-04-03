@@ -1,4 +1,5 @@
 #![recursion_limit = "1024"]
+#![feature(box_syntax)]
 
 extern crate reqwest;
 extern crate bmp;
@@ -17,31 +18,11 @@ use std::io::prelude::*;
 // use std::error::Error;
 use std::path::Path;
 
-#[derive(Deserialize, Debug)]
-struct ConfigData {
-    image: ConfigImage,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-struct ConfigUserToml {
-    users: Vec<ConfigUser>,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-struct ConfigUser {
-    username: String,
-    password: String,
-}
-#[derive(Deserialize, Debug, Clone)]
-struct ConfigImage {
-    path: String,
-    offset: ConfigOffset,
-}
-#[derive(Deserialize, Debug, Clone, Copy)]
-struct ConfigOffset {
-    x: u32,
-    y: u32,
-}
+#[derive(Deserialize, Debug, Clone)] struct ConfigUserToml { users: Vec<ConfigUser> }
+#[derive(Deserialize, Debug, Clone)] struct ConfigTargetToml { image: ConfigImage }
+#[derive(Deserialize, Debug, Clone)] struct ConfigUser { username: String, password: String }
+#[derive(Deserialize, Debug, Clone)] struct ConfigImage { path: String, offset: ConfigOffset }
+#[derive(Deserialize, Debug, Clone, Copy)] struct ConfigOffset { x: u32, y: u32 }
 
 #[derive(Deserialize, Debug)]
 struct RedditLogin {
@@ -120,6 +101,13 @@ struct UserToken {
     cookies: Vec<String>,
     modhash: String,
     username: String,
+}
+
+#[derive(Debug, Clone)]
+struct PixelImage {
+    width: u32,
+    height: u32,
+    pixels: Box<[u8]>, // in palette index   
 }
 
 /// Login to Reddit.
@@ -243,7 +231,7 @@ fn check_pixel(x: u32, y: u32, color: u32) -> bool {
     }
 }
 
-fn load_image(path: &str) -> (u32, u32, Vec<u32>) {
+fn load_image(path: &str) -> PixelImage {
     let palletes: [(u8, u8, u8); 16] = [(255, 255, 255),
                                         (228, 228, 228),
                                         (136, 136, 136),
@@ -261,23 +249,6 @@ fn load_image(path: &str) -> (u32, u32, Vec<u32>) {
                                         (207, 110, 228),
                                         (130, 0, 128)];
 
-    // <div style="background-color: rgb(255, 255, 255);" class="place-swatch"></div>
-    // <div style="background-color: rgb(228, 228, 228);" class="place-swatch"></div>
-    // <div style="background-color: rgb(136, 136, 136);" class="place-swatch"></div>
-    // <div style="background-color: rgb(34, 34, 34);" class="place-swatch"></div>
-    // <div style="background-color: rgb(255, 167, 209);" class="place-swatch"></div>
-    // <div style="background-color: rgb(229, 0, 0);" class="place-swatch"></div>
-    // <div style="background-color: rgb(229, 149, 0);" class="place-swatch"></div>
-    // <div style="background-color: rgb(160, 106, 66);" class="place-swatch"></div>
-    // <div style="background-color: rgb(229, 217, 0);" class="place-swatch"></div>
-    // <div style="background-color: rgb(148, 224, 68);" class="place-swatch"></div>
-    // <div style="background-color: rgb(2, 190, 1);" class="place-swatch"></div>
-    // <div style="background-color: rgb(0, 211, 221);" class="place-swatch"></div>
-    // <div style="background-color: rgb(0, 131, 199);" class="place-swatch"></div>
-    // <div style="background-color: rgb(0, 0, 234);" class="place-swatch"></div>
-    // <div style="background-color: rgb(207, 110, 228);" class="place-swatch"></div>
-    // <div style="background-color: rgb(130, 0, 128);" class="place-swatch"></div></div>
-
     println!("[load reference bitmap] {}", path);
 
     let img = bmp::open(path).unwrap_or_else(|e| {
@@ -287,17 +258,16 @@ fn load_image(path: &str) -> (u32, u32, Vec<u32>) {
     let width = img.get_width();
     let height = img.get_height();
 
-    let mut content: Vec<u32> = Vec::new();
+    let mut content: Vec<u8> = Vec::new();
 
     for (x, y) in img.coordinates() {
         let pixel = img.get_pixel(x, y);
-        /// rgb = 0,1,2
 
         let mut has_pallete = false;
         for (index, &(r, g, b)) in palletes.into_iter().enumerate() {
             if pixel.r == r && pixel.g == g && pixel.b == b {
                 has_pallete = true;
-                content.push(index as u32);
+                content.push(index as u8);
                 break;
             } else {
                 continue;
@@ -316,7 +286,11 @@ fn load_image(path: &str) -> (u32, u32, Vec<u32>) {
     }
 
     println!("  image size: {} x {}", width, height);
-    (width, height, content)
+    PixelImage {
+        width: width,
+        height: height,
+        pixels: content.into_boxed_slice()
+    }
 }
 
 /// check pixel in /r/place randomly,
@@ -324,23 +298,17 @@ fn load_image(path: &str) -> (u32, u32, Vec<u32>) {
 /// replace the pixel
 /// return true if pixel replaced
 /// false othwerwise
-fn work(width: u32,
-        height: u32,
-        pixels: &[u32],
-        offset_x: u32,
-        offset_y: u32,
-        user_token: &UserToken)
-        -> bool {
+fn work(image: &PixelImage, offset_x: u32, offset_y: u32, user_token: &UserToken) -> bool {
     use rand::distributions::{IndependentSample, Range};
 
-    let between_x = Range::new(0, width);
-    let between_y = Range::new(0, height);
+    let between_x = Range::new(0, image.width);
+    let between_y = Range::new(0, image.height);
     let mut rng = rand::thread_rng();
 
     let x = between_x.ind_sample(&mut rng);
     let y = between_y.ind_sample(&mut rng);
-    let index = (y * width) + x;
-    let color = pixels[index as usize];
+    let index = (y * image.width) + x;
+    let color = image.pixels[index as usize] as u32;
 
     let absolute_x = offset_x + x;
     let absolute_y = offset_y + y;
@@ -355,13 +323,12 @@ fn work(width: u32,
 
 
 /// just looping
-fn worker_per_user<'a>(width: u32,
-                       height: u32,
-                       pixels: &'a [u32],
+fn worker_per_user<'a>(image: &'a PixelImage,
                        offset_x: u32,
                        offset_y: u32,
                        username: &'a str,
                        password: &'a str) {
+
     const MAX_RETRY: i32 = 5;
 
     loop {
@@ -381,7 +348,7 @@ fn worker_per_user<'a>(width: u32,
         let mut retry = 0;
 
         while is_working == false && retry < MAX_RETRY {
-            is_working = work(width, height, &pixels, offset_x, offset_y, &user_token);
+            is_working = work(&image, offset_x, offset_y, &user_token);
             retry += 1;
 
             /// sleep 100 ms
@@ -415,10 +382,12 @@ fn load_available_accounts() -> Result<Vec<ConfigUser>> {
     Ok(content.users)
 }
 
-fn main() {
-    let config = load_toml("reddit_place.toml");
-    let ConfigData { image } = config.unwrap();
+fn load_target() -> Result<ConfigImage> {
+    let content: ConfigTargetToml = load_toml("target.toml")?;
+    Ok(content.image)
+}
 
+fn main() {
     // get users account data
     let users = match load_available_accounts(){
         Ok(users) => users,
@@ -428,29 +397,30 @@ fn main() {
         }
     };
 
+    /// get target data
+    let target = match load_target() {
+        Ok(target) => target,
+        Err(why) => {
+            println!("cannot open target.toml: {}", why.description());
+            return
+        }
+    };
 
+    let ConfigImage { path, offset } = target;
+    let image = load_image(&path);
 
     let mut children = vec![];
     for ConfigUser { username, password } in users {
         let image = image.clone();
         children.push(std::thread::spawn(move || {
             println!("thread for user {}", username);
-
-            let offset = image.offset;
-            let image_path = &image.path;
-            let (width, height, pixels) = load_image(&image_path);
-            worker_per_user(width,
-                            height,
-                            &pixels,
-                            offset.x,
-                            offset.y,
-                            &username,
-                            &password);
+            worker_per_user(&image, offset.x, offset.y, &username, &password);
         }));
     }
 
     for child in children {
-        let _ = child.join();
+        let result = child.join();
+        assert!(result.is_err());
     }
 
 }

@@ -1,0 +1,9 @@
+[image]
+    path = "./indonesia.bmp"            ## target image reference. file must be BMP & have color like in /r/place
+    offset = { x = 109, y = 698}        ## Top Left Coordinate in /r/place
+
+## current teritory:
+##   (109, 698) - (109, 709)
+##   (145, 698)
+##   w = 36
+##   h = 11
